@@ -43,8 +43,30 @@ jobs:
                   applicationId = "com.example.floatcheck"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "2.0"
+              }
+              signingConfigs {
+                  create("rel") {
+                      storeFile = file("../ci.jks")
+                      storePassword = "android"
+                      keyAlias = "ci"
+                      keyPassword = "android"
+                  }
+              }
+              buildTypes {
+                  release {
+                      isMinifyEnabled = true
+                      isShrinkResources = true
+                      signingConfig = signingConfigs.getByName("rel")
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                  }
+              }
+              lint { checkReleaseBuilds = false; abortOnError = false }
+              packaging {
+                  resources {
+                      excludes += listOf("kotlin/**", "**/*.kotlin_builtins", "**/*.kotlin_module", "DebugProbesKt.bin")
+                  }
               }
               kotlinOptions { jvmTarget = "17" }
               compileOptions {
@@ -52,7 +74,10 @@ jobs:
                   targetCompatibility = JavaVersion.VERSION_17
               }
           }
-          // No dependencies, no ads, no analytics.
+          EOF_FILE
+          mkdir -p app
+          cat > app/proguard-rules.pro <<'EOF_FILE'
+          -dontwarn **
           EOF_FILE
           mkdir -p app/src/main
           cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
@@ -62,6 +87,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
 
               <application android:label="Floating Checkbox"
                   android:icon="@android:drawable/checkbox_on_background">
@@ -83,121 +109,400 @@ jobs:
           cat > app/src/main/java/com/example/floatcheck/MainActivity.kt <<'EOF_FILE'
           package com.example.floatcheck
 
+          import android.Manifest
           import android.app.Activity
           import android.content.Intent
+          import android.graphics.drawable.GradientDrawable
           import android.net.Uri
+          import android.os.Build
           import android.os.Bundle
           import android.provider.Settings
-          import android.widget.Button
-          import android.widget.LinearLayout
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.*
 
           class MainActivity : Activity() {
+              private val bg = 0xFF0F172A.toInt()
+              private val card = 0xFF1E293B.toInt()
+              private val accent = 0xFF38BDF8.toInt()
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun rounded(c: Int, r: Int) = GradientDrawable().apply { cornerRadius = dp(r).toFloat(); setColor(c) }
+
+              private fun btn(t: String, c: Int, tc: Int = 0xFFFFFFFF.toInt()) = Button(this).apply {
+                  text = t; isAllCaps = false; setTextColor(tc); background = rounded(c, 14); textSize = 15f
+              }
+
+              private fun label(t: String) = TextView(this).apply {
+                  text = t; setTextColor(0xFF94A3B8.toInt()); textSize = 13f; setPadding(0, dp(14), 0, dp(4))
+              }
+
+              private fun field(hint: String, v: String, num: Boolean) = EditText(this).apply {
+                  setText(v); this.hint = hint; setTextColor(0xFFFFFFFF.toInt()); setHintTextColor(0xFF64748B.toInt())
+                  background = rounded(card, 12); setPadding(dp(14), dp(10), dp(14), dp(10)); textSize = 16f
+                  if (num) { inputType = InputType.TYPE_CLASS_NUMBER; gravity = Gravity.CENTER } else setSingleLine()
+              }
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  val root = LinearLayout(this).apply {
+                  if (Build.VERSION.SDK_INT >= 33)
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                  val p = getSharedPreferences("cfg", MODE_PRIVATE)
+                  var count = p.getInt("count", 3)
+                  val secs0 = p.getInt("secs", 300)
+
+                  val col = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setPadding(48, 96, 48, 48)
+                      setPadding(dp(20), dp(40), dp(20), dp(24))
                   }
-                  root.addView(Button(this).apply {
-                      text = "Show floating checkbox"
-                      setOnClickListener {
-                          if (!Settings.canDrawOverlays(this@MainActivity)) {
-                              startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                  Uri.parse("package:$packageName")))
-                          } else {
-                              startForegroundService(Intent(this@MainActivity, FloatService::class.java))
-                          }
+                  col.addView(TextView(this).apply {
+                      text = "Floating Checkboxes"; setTextColor(0xFFFFFFFF.toInt()); textSize = 24f
+                      setTypeface(typeface, android.graphics.Typeface.BOLD)
+                  })
+
+                  col.addView(label("Number of boxes (1–15)"))
+                  val countTv = TextView(this).apply {
+                      text = "$count"; setTextColor(accent); textSize = 24f; gravity = Gravity.CENTER
+                      setTypeface(typeface, android.graphics.Typeface.BOLD)
+                  }
+                  val minus = btn("−", card); val plus = btn("+", card)
+                  minus.setOnClickListener { if (count > 1) count--; countTv.text = "$count" }
+                  plus.setOnClickListener { if (count < 15) count++; countTv.text = "$count" }
+                  col.addView(LinearLayout(this).apply {
+                      gravity = Gravity.CENTER_VERTICAL
+                      addView(minus, LinearLayout.LayoutParams(dp(64), dp(48)))
+                      addView(countTv, LinearLayout.LayoutParams(0, -2, 1f))
+                      addView(plus, LinearLayout.LayoutParams(dp(64), dp(48)))
+                  })
+
+                  col.addView(label("Label text"))
+                  val labelEt = field("e.g. Prayers, Tasks, Reps", p.getString("label", "") ?: "", false)
+                  col.addView(labelEt)
+
+                  col.addView(label("Timer (0 = no timer, max 30 min)"))
+                  val minEt = field("min", "${secs0 / 60}", true)
+                  val secEt = field("sec", "${secs0 % 60}", true)
+                  col.addView(LinearLayout(this).apply {
+                      gravity = Gravity.CENTER_VERTICAL
+                      addView(minEt, LinearLayout.LayoutParams(0, -2, 1f))
+                      addView(TextView(context).apply { text = "min"; setTextColor(0xFF94A3B8.toInt()); setPadding(dp(8), 0, dp(14), 0) })
+                      addView(secEt, LinearLayout.LayoutParams(0, -2, 1f))
+                      addView(TextView(context).apply { text = "sec"; setTextColor(0xFF94A3B8.toInt()); setPadding(dp(8), 0, 0, 0) })
+                  })
+
+                  val chips = LinearLayout(this).apply { setPadding(0, dp(10), 0, 0) }
+                  for ((t, s) in listOf("1m" to 60, "5m" to 300, "10m" to 600, "15m" to 900, "30m" to 1800)) {
+                      chips.addView(btn(t, card, accent).apply {
+                          setOnClickListener { minEt.setText("${s / 60}"); secEt.setText("0") }
+                      }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
+                  }
+                  col.addView(chips)
+
+                  val start = btn("Show overlay", accent, 0xFF0B1220.toInt())
+                  start.setOnClickListener {
+                      val m = (minEt.text.toString().toIntOrNull() ?: 0).coerceIn(0, 30)
+                      val s = (secEt.text.toString().toIntOrNull() ?: 0).coerceIn(0, 59)
+                      val total = (m * 60 + s).coerceAtMost(1800)
+                      val lbl = labelEt.text.toString().trim()
+                      p.edit().putInt("count", count).putInt("secs", total).putString("label", lbl).apply()
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "Allow \"Display over other apps\", then tap again", Toast.LENGTH_LONG).show()
+                          startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                      } else {
+                          startForegroundService(Intent(this, FloatService::class.java)
+                              .putExtra("count", count).putExtra("label", lbl).putExtra("secs", total))
+                          moveTaskToBack(true)
                       }
-                  })
-                  root.addView(Button(this).apply {
-                      text = "Hide floating checkbox"
-                      setOnClickListener { stopService(Intent(this@MainActivity, FloatService::class.java)) }
-                  })
-                  setContentView(root)
+                  }
+                  val stop = btn("Hide overlay", card)
+                  stop.setOnClickListener { stopService(Intent(this, FloatService::class.java)) }
+                  col.addView(start, LinearLayout.LayoutParams(-1, dp(52)).apply { topMargin = dp(24) })
+                  col.addView(stop, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(10) })
+
+                  setContentView(ScrollView(this).apply { setBackgroundColor(bg); addView(col) })
               }
           }
           EOF_FILE
+          mkdir -p app/src/main/java/com/example/floatcheck
           cat > app/src/main/java/com/example/floatcheck/FloatService.kt <<'EOF_FILE'
           package com.example.floatcheck
 
           import android.app.*
+          import android.content.Context
           import android.content.Intent
           import android.content.pm.ServiceInfo
           import android.graphics.PixelFormat
-          import android.os.Build
-          import android.os.IBinder
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.media.AudioAttributes
+          import android.media.Ringtone
+          import android.media.RingtoneManager
+          import android.os.*
+          import android.text.TextUtils
           import android.view.*
-          import android.widget.CheckBox
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import kotlin.math.abs
+
+          class DragCard(
+              ctx: Context,
+              private val lp: WindowManager.LayoutParams,
+              private val wm: WindowManager,
+              private val onMoved: (Int, Int) -> Unit
+          ) : LinearLayout(ctx) {
+              private var dx = 0f; private var dy = 0f; private var sx = 0; private var sy = 0
+              private var drag = false
+              private val slop = ViewConfiguration.get(ctx).scaledTouchSlop
+
+              override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; sx = lp.x; sy = lp.y; drag = false }
+                      MotionEvent.ACTION_MOVE ->
+                          if (!drag && (abs(e.rawX - dx) > slop || abs(e.rawY - dy) > slop)) drag = true
+                  }
+                  return drag
+              }
+
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_MOVE -> if (drag) {
+                          lp.x = sx + (e.rawX - dx).toInt(); lp.y = sy + (e.rawY - dy).toInt()
+                          wm.updateViewLayout(this, lp)
+                      }
+                      MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { if (drag) onMoved(lp.x, lp.y); drag = false }
+                  }
+                  return true
+              }
+          }
 
           class FloatService : Service() {
               private lateinit var wm: WindowManager
-              private var box: CheckBox? = null
+              private val h = Handler(Looper.getMainLooper())
+              private var card: DragCard? = null
+              private var body: LinearLayout? = null
+              private var timeTv: TextView? = null
+              private var playTv: TextView? = null
+              private val boxes = mutableListOf<TextView>()
+              private var checked = BooleanArray(0)
+
+              private var total = 0L
+              private var remaining = 0L
+              private var endAt = 0L
+              private var running = false
+              private var done = false
+              private var ringtone: Ringtone? = null
+              private var vib: Vibrator? = null
+
+              private val accent = 0xFF38BDF8.toInt()
+              private val danger = 0xFFEF4444.toInt()
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun rounded(c: Int, r: Int, stroke: Int = 0, sc: Int = 0) = GradientDrawable().apply {
+                  cornerRadius = dp(r).toFloat(); setColor(c); if (stroke > 0) setStroke(dp(stroke), sc)
+              }
 
               override fun onBind(intent: Intent?): IBinder? = null
 
               override fun onCreate() {
                   super.onCreate()
                   val nm = getSystemService(NotificationManager::class.java)
-                  nm.createNotificationChannel(
-                      NotificationChannel("float", "Floating checkbox", NotificationManager.IMPORTANCE_MIN))
+                  nm.createNotificationChannel(NotificationChannel("float", "Floating checkbox", NotificationManager.IMPORTANCE_MIN))
                   val n = Notification.Builder(this, "float")
                       .setSmallIcon(android.R.drawable.checkbox_on_background)
                       .setContentTitle("Floating checkbox is on").build()
                   if (Build.VERSION.SDK_INT >= 34)
                       startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
                   else startForeground(1, n)
-
                   wm = getSystemService(WINDOW_SERVICE) as WindowManager
-                  val prefs = getSharedPreferences("state", MODE_PRIVATE)
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent != null) build(
+                      intent.getIntExtra("count", 3).coerceIn(1, 15),
+                      intent.getStringExtra("label") ?: "",
+                      intent.getIntExtra("secs", 0).coerceIn(0, 1800)
+                  )
+                  return START_NOT_STICKY
+              }
+
+              private fun icon(t: String, onClick: () -> Unit) = TextView(this).apply {
+                  text = t; setTextColor(0xFFFFFFFF.toInt()); textSize = 15f; gravity = Gravity.CENTER
+                  background = rounded(0x26FFFFFF, 15)
+                  layoutParams = LinearLayout.LayoutParams(dp(30), dp(30)).apply { setMargins(dp(3), 0, 0, 0) }
+                  setOnClickListener { onClick() }
+              }
+
+              private fun build(count: Int, label: String, secs: Int) {
+                  tearDown()
+                  total = secs * 1000L; remaining = total; running = false; done = false
+                  checked = BooleanArray(count)
+                  val prefs = getSharedPreferences("pos", MODE_PRIVATE)
                   val lp = WindowManager.LayoutParams(
-                      WindowManager.LayoutParams.WRAP_CONTENT,
-                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                      PixelFormat.TRANSLUCENT
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
                   ).apply {
                       gravity = Gravity.TOP or Gravity.START
-                      x = prefs.getInt("x", 100); y = prefs.getInt("y", 300)
+                      x = prefs.getInt("x", dp(16)); y = prefs.getInt("y", dp(120))
                   }
+                  val c = DragCard(this, lp, wm) { x, y -> prefs.edit().putInt("x", x).putInt("y", y).apply() }
+                  c.orientation = LinearLayout.VERTICAL
+                  c.setPadding(dp(12), dp(8), dp(10), dp(10))
 
-                  val cb = CheckBox(this).apply {
-                      isChecked = prefs.getBoolean("checked", false)
-                      scaleX = 1.5f; scaleY = 1.5f
-                      setBackgroundColor(0xCCFFFFFF.toInt())
-                      setPadding(24, 24, 24, 24)
-                      setOnCheckedChangeListener { _, c -> prefs.edit().putBoolean("checked", c).apply() }
+                  val header = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+                  val title = TextView(this).apply {
+                      text = label.ifBlank { "Checklist" }
+                      setTextColor(0xFFFFFFFF.toInt()); textSize = 13f
+                      setTypeface(typeface, Typeface.BOLD)
+                      maxWidth = dp(150); setSingleLine(); ellipsize = TextUtils.TruncateAt.END
+                      setOnClickListener { body?.let { it.visibility = if (it.visibility == View.VISIBLE) View.GONE else View.VISIBLE } }
                   }
-                  var dx = 0f; var dy = 0f; var sx = 0; var sy = 0; var drag = false
-                  cb.setOnTouchListener { _, e ->
-                      when (e.action) {
-                          MotionEvent.ACTION_DOWN -> { dx = e.rawX; dy = e.rawY; sx = lp.x; sy = lp.y; drag = false; false }
-                          MotionEvent.ACTION_MOVE -> {
-                              val mx = e.rawX - dx; val my = e.rawY - dy
-                              if (Math.abs(mx) > 12 || Math.abs(my) > 12) drag = true
-                              if (drag) { lp.x = sx + mx.toInt(); lp.y = sy + my.toInt(); wm.updateViewLayout(cb, lp) }
-                              drag
-                          }
-                          MotionEvent.ACTION_UP -> {
-                              if (drag) prefs.edit().putInt("x", lp.x).putInt("y", lp.y).apply()
-                              drag
-                          }
-                          else -> false
+                  val tt = TextView(this).apply {
+                      setTextColor(accent); textSize = 15f; setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                      setPadding(dp(12), 0, dp(8), 0)
+                      visibility = if (secs > 0) View.VISIBLE else View.GONE
+                  }
+                  timeTv = tt
+                  header.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
+                  header.addView(tt)
+                  header.addView(icon("✕") { stopSelf() })
+
+                  val b = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  var row: LinearLayout? = null
+                  for (i in 0 until count) {
+                      if (i % 5 == 0) {
+                          row = LinearLayout(this).apply { setPadding(0, dp(6), 0, 0) }
+                          b.addView(row)
+                      }
+                      val box = TextView(this).apply {
+                          gravity = Gravity.CENTER; textSize = 15f
+                          layoutParams = LinearLayout.LayoutParams(dp(30), dp(30)).apply { setMargins(0, 0, dp(6), 0) }
+                          setOnClickListener { checked[i] = !checked[i]; styleBox(i) }
+                      }
+                      boxes.add(box); row!!.addView(box); styleBox(i)
+                  }
+                  val controls = LinearLayout(this).apply { gravity = Gravity.END; setPadding(0, dp(8), 0, 0) }
+                  if (secs > 0) {
+                      val pt = icon("▶") { playClick() }
+                      playTv = pt; controls.addView(pt)
+                  }
+                  controls.addView(icon("↺") { resetAll() })
+                  b.addView(controls)
+                  body = b
+
+                  c.addView(header); c.addView(b)
+                  card = c
+                  wm.addView(c, lp)
+                  refresh()
+              }
+
+              private fun styleBox(i: Int) {
+                  val v = boxes[i]
+                  if (checked[i]) {
+                      v.background = rounded(accent, 8); v.text = "✓"; v.setTextColor(0xFF0B1220.toInt())
+                  } else {
+                      v.background = rounded(0x00000000, 8, 2, accent); v.text = ""
+                  }
+              }
+
+              private fun fmt(ms: Long): String {
+                  val s = (ms + 999) / 1000
+                  return "%02d:%02d".format(s / 60, s % 60)
+              }
+
+              private fun refresh() {
+                  timeTv?.text = fmt(remaining)
+                  timeTv?.setTextColor(if (done) danger else accent)
+                  playTv?.text = if (done) "■" else if (running) "⏸" else "▶"
+                  card?.background = rounded(if (done) 0xF27F1D1D.toInt() else 0xF2111827.toInt(), 18, 1, 0x33FFFFFF)
+              }
+
+              private val tick = object : Runnable {
+                  override fun run() {
+                      if (!running) return
+                      remaining = endAt - SystemClock.elapsedRealtime()
+                      if (remaining <= 0) {
+                          remaining = 0; running = false; done = true
+                          body?.visibility = View.VISIBLE
+                          ring()
+                      } else h.postDelayed(this, 250)
+                      refresh()
+                  }
+              }
+
+              private val autoStop = Runnable {
+                  stopAlarm(); done = false; remaining = total; refresh()
+              }
+
+              private fun playClick() {
+                  when {
+                      done -> { stopAlarm(); done = false; remaining = total }
+                      running -> { remaining = endAt - SystemClock.elapsedRealtime(); running = false; h.removeCallbacks(tick) }
+                      else -> {
+                          if (remaining <= 0) remaining = total
+                          endAt = SystemClock.elapsedRealtime() + remaining
+                          running = true; h.post(tick)
                       }
                   }
-                  box = cb
-                  wm.addView(cb, lp)
+                  refresh()
+              }
+
+              private fun resetAll() {
+                  stopAlarm(); h.removeCallbacks(tick)
+                  running = false; done = false; remaining = total
+                  for (i in checked.indices) { checked[i] = false; styleBox(i) }
+                  refresh()
+              }
+
+              private fun ring() {
+                  stopAlarm()
+                  try {
+                      val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                          ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                      ringtone = RingtoneManager.getRingtone(this, uri).apply {
+                          audioAttributes = AudioAttributes.Builder()
+                              .setUsage(AudioAttributes.USAGE_ALARM)
+                              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build()
+                          if (Build.VERSION.SDK_INT >= 28) isLooping = true
+                          play()
+                      }
+                  } catch (_: Exception) {}
+                  try {
+                      vib = getSystemService(Vibrator::class.java)
+                      vib?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 600, 400), 0))
+                  } catch (_: Exception) {}
+                  h.postDelayed(autoStop, 60_000)
+              }
+
+              private fun stopAlarm() {
+                  h.removeCallbacks(autoStop)
+                  try { ringtone?.stop() } catch (_: Exception) {}
+                  ringtone = null
+                  try { vib?.cancel() } catch (_: Exception) {}
+              }
+
+              private fun tearDown() {
+                  running = false
+                  h.removeCallbacksAndMessages(null)
+                  stopAlarm()
+                  card?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+                  card = null; body = null; timeTv = null; playTv = null
+                  boxes.clear()
               }
 
               override fun onDestroy() {
-                  box?.let { wm.removeView(it) }
+                  tearDown()
                   super.onDestroy()
               }
           }
           EOF_FILE
+          keytool -genkeypair -keystore ci.jks -storetype JKS -alias ci -keyalg RSA -keysize 2048 -validity 36500 -storepass android -keypass android -dname "CN=FloatingCheckbox"
       - name: Build
-        run: gradle assembleDebug --no-daemon
+        run: gradle assembleRelease --no-daemon
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v${{ github.run_number }}" app/build/outputs/apk/debug/app-debug.apk --repo "${{ github.repository }}" --title "Floating Checkbox v${{ github.run_number }}" --notes "Debug APK"
+          gh release create "v${{ github.run_number }}" app/build/outputs/apk/release/app-release.apk --repo "${{ github.repository }}" --title "Floating Checkbox v${{ github.run_number }}" --notes "Release APK"
